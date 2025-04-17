@@ -17,7 +17,6 @@ import heapq
 import imageio.v2 as imageio  # pip install imageio[ffmpeg]
 import io
 
-
 #### Set up constants for experiment ####
 
 # Define which figures to be active
@@ -57,7 +56,8 @@ avoid_pursuers = True # Evader ignores pursuers if False
 evader_speed_limit = 0.95
 
 # Pursuer parameters
-chase_evader = True # Pursuers slowly drive upwards if False
+# Joseph Note - link chase_evader variable to the difference between uninformed search and directed A* once evader is found
+chase_evader = False # Pursuers slowly drive upwards if False
 pursuer_speed_limit = 0.33
 
 # Figure saving
@@ -86,6 +86,19 @@ initial_evaders = np.array([
     [1.45], 
     [0.2], 
     [np.pi]])
+
+# y-coord
+# x-coord
+# ??? coord
+patrol_goals = np.array([
+    [16, 16, 48],
+    [52, 87, 17]
+])
+
+patrol_returns = np.array([
+    [48, 48, 48],
+    [52, 17, 87]
+])
 
 initial_conditions = np.hstack((initial_pursuers, initial_evaders))
 r = robotarium.Robotarium(number_of_robots=N, show_figure=(1 in active_figures), initial_conditions=initial_conditions)
@@ -401,6 +414,7 @@ for t in range(iterations):
                 pur_loc_scaled_again = (pur_loc_r, pur_loc_c)
                 # The pursuers will use an inflated maze to avoid hitting walls
                 # since they don't have the same potential field as the evader
+                print(eva_loc_scaled)
                 path = astar(inflated_maze, pur_loc_scaled_again, eva_loc_scaled)
                 if path is not None:
                     #Create an array of pursuer next positions
@@ -417,12 +431,59 @@ for t in range(iterations):
             pur_vel[:, non_zero_norms] = pur_vel[:, non_zero_norms] * pursuer_speed_limit * r.max_linear_velocity / norms[non_zero_norms]
             dx[0, :pursuers] = pur_vel[0]
             dx[1, :pursuers] = pur_vel[1]
+        # Search case. Change chase_evader to true if the evader comes within a certain radius of a pursuer
         else:
-            #move upwards if chase evader is false
+            # Currently remaining stationary for testing/"if evader is in certain radius"-ness
+            #pur_vel = np.zeros((2, pursuers))
+            #pur_vel[1, :] = 0.05
+
+            pur_next_pos = np.zeros((2, pursuers))
             pur_vel = np.zeros((2, pursuers))
-            pur_vel[1, :] = 0.05
-            #dx[0, :pursuers] = pur_vel[0]
+
+            dx[0, :pursuers] = pur_vel[0]
             dx[1, :pursuers] = pur_vel[1]
+            
+            for i in range(pursuers):
+                pur_loc_r = pur_loc_scaled[0][i]
+                pur_loc_c = pur_loc_scaled[1][i]
+                pur_loc_scaled_again = (pur_loc_r, pur_loc_c)
+
+                # Pursuers use same maze as in A* chase, but use goal points for patrol of the space
+                patrol_goal_current = (patrol_goals[0][i], patrol_goals[1][i])
+
+                # If a bot reaches its patrol goal, switch to second patrol goal
+                if abs(patrol_goal_current[0] - pur_loc_scaled_again[0]) < 5 and abs(patrol_goal_current[1] - pur_loc_scaled_again[1]):
+                    temp_1 = patrol_goals[0][i]
+                    temp_2 = patrol_goals[1][i]
+                    patrol_goals[0][i] = patrol_returns[0][i]
+                    patrol_goals[1][i] = patrol_returns[1][i]
+                    patrol_returns[0][i] = temp_1
+                    patrol_returns[1][i] = temp_2
+
+                path = astar(inflated_maze, pur_loc_scaled_again, patrol_goal_current)
+
+                if path is not None:
+                    #Create an array of pursuer next positions
+                    pur_next_pos[0, i] = path[1][0]
+                    pur_next_pos[1, i] = path[1][1]
+                    pur_vel[0, i] = (pur_next_pos[1, i] - pur_loc_scaled_again[1])/500*scale
+                    pur_vel[1, i] = (pur_next_pos[0, i] - pur_loc_scaled_again[0])/-500*scale
+
+            # Normalize
+            norms = np.linalg.norm(pur_vel, axis=0)
+            non_zero_norms = norms != 0
+            pur_vel[:, non_zero_norms] = pur_vel[:, non_zero_norms] * pursuer_speed_limit * r.max_linear_velocity / norms[non_zero_norms]
+            dx[0, :pursuers] = pur_vel[0]
+            dx[1, :pursuers] = pur_vel[1]
+
+            # Change patrol point if previous one has been reached
+        
+
+            # "Intruder detected" condition - if any of the pursuers are within a certain distance of the pursuer, all of them begin A* chase
+            for i in range(0, pur_loc.shape[1]):
+                if np.linalg.norm(pur_loc[:, i] - eva_loc) < 0.75:
+                    print("Found them!")
+                    chase_evader = True
         
         #convert row, column to x, y
         # Aren note - since the map is scaled, using x and y becomes inaccurate with scale estimations
