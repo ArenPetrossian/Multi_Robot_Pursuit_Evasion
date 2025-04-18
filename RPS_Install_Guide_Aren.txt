@@ -1,0 +1,15 @@
+Download and install python3 package
+
+To get robotarium files running:
+	pip install numpy
+	pip install scipy
+	pip install matplotlib
+	pip install cvxopt
+	Download robotarium_python_simulator
+	Go to python simulator folder containing setup.py:
+		pip install .
+
+
+To get my potential field code running:
+	pip install pillow
+	pip install imageio[ffmpeg]

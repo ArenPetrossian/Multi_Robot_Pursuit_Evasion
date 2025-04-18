@@ -1,27 +1,27 @@
-import numpy as np
-from PIL import Image
+import numpy as np                                  # pip install numpy
+from PIL import Image                               # pip install pillow
 from rps.utilities.transformations import *
 from rps.utilities.graph import *
 from rps.utilities.barrier_certificates import *
 from rps.utilities.misc import *
 from rps.utilities.controllers import *
-import cv2
+#import cv2
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt                     # pip install matplotlib
 from matplotlib.patches import Wedge
 import rps.robotarium as robotarium
 from datetime import datetime
 import os
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation           # pip install scipy
 import heapq
-import imageio.v2 as imageio  # pip install imageio[ffmpeg]
+import imageio.v2 as imageio                        # pip install imageio[ffmpeg]
 import io
 
 
 #### Set up constants for experiment ####
 
 # Define which figures to be active
-active_figures = [1, 5, 7]
+active_figures = [1, 7]
             # 1: Robotarium figure (Always active)
             # 2: Original Map Graph
             # 3: Scaled Maze
@@ -30,6 +30,7 @@ active_figures = [1, 5, 7]
             # 6: 3D Static Potential Field
             # 7: Pursuer Potential Field, Dynamic Potential Field
             # 8: 3D Pursuer Potential Field, 3D Dynamic Potential Field
+            # 9: Avoiding Local Minima Potential Field
 
 # Record Video
 video_flag = False  # Change to True to record video
@@ -46,24 +47,26 @@ robot_radius = int(0.06*500/scale)  # Number of grid cells to expand walls
 goals = [(-1.18, -0.95), (0.2, -0.95)]
 
 # Load/Save Potential Field Arrays
-load_from_csv = True
+load_from_csv = False
 save_to_csv = False
 
 # Number of iterations until code stops
-iterations = 900 #900, 725
+iterations = 10000 #900, 725
 
 # Evader parameters
 avoid_pursuers = True # Evader ignores pursuers if False
-evader_speed_limit = 0.95
+evader_speed_limit = 0.90
+avoid_local_minima = True # Switch to avoiding local minima when cornered
 
 # Pursuer parameters
 chase_evader = True # Pursuers slowly drive upwards if False
 pursuer_speed_limit = 0.33
+catch_distance = 0.25 # Distance at which pursuers catch the evader
 
 # Figure saving
 save_figures = False # Save pngs of active figures
 save_figure_iterations = [175] # Iteration numbers to save figures
-keep_figures_open = True # Keep code running so figures don't close
+keep_figures_open = False # Keep code running so figures don't close
 
 #### END VARIABLES ####
 
@@ -171,13 +174,14 @@ def astar(grid, start, goal):
                     f_score[neighbor] = temp_g_score + heuristic(neighbor, goal)
                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
     return None  # No path found, code currently assumes path found
-# repulsive was 0.5
-def potential_field(grid, goals, repulsive_scale=0.75, attractive_scale=1.0, influence_radius=8):
+
+def potential_field(grid, goals, repulsive_scale=0.75, attractive_scale=1.0, influence_radius=0.24, scale=scale):
     rows, cols = grid.shape
     depth = len(goals)
     astar_attractive_potential = np.zeros((rows, cols, depth))
     wall_repulsive_potential = np.zeros((rows, cols))
     wall_raising_potential = np.zeros((rows, cols))
+    influence_radius = int(influence_radius * 500 / scale)
     # Calculate attractive potential
     for r in range(rows):
         print ("Deleting System32: ", int(r/rows*100), "%")
@@ -208,9 +212,10 @@ def potential_field(grid, goals, repulsive_scale=0.75, attractive_scale=1.0, inf
                                 wall_raising_potential[r, c] = closest_potential
     return astar_attractive_potential, wall_repulsive_potential, wall_raising_potential
     
-def avoid_pursuers_potential_field(pursuer_loc, repulsive_scale=30.0, influence_radius=20):
+def avoid_pursuers_potential_field(pursuer_loc, repulsive_scale=30.0, influence_radius=0.6, scale=scale):
     rows, cols = pursuer_loc.shape
     potential = np.zeros((rows, cols))
+    influence_radius = int(influence_radius * 500 / scale)
     # Calculate repulsive potential
     for r in range(rows):
         for c in range(cols):
@@ -218,7 +223,7 @@ def avoid_pursuers_potential_field(pursuer_loc, repulsive_scale=30.0, influence_
                 for i in range(max(0, r - influence_radius), min(rows, r + influence_radius + 1)):
                     for j in range(max(0, c - influence_radius), min(cols, c + influence_radius + 1)):
                         dist = np.sqrt((r - i) ** 2 + (c - j) ** 2)
-                        if dist != 0 and dist <= influence_radius:
+                        if dist <= influence_radius:
                             #potential[i, j] += repulsive_scale * (np.cos(np.pi * dist / influence_radius))
                             potential[i, j] += repulsive_scale * (1 + np.cos(np.pi * dist / influence_radius)) / 2
     return potential
@@ -270,6 +275,7 @@ else:
 
 static_pot_field = np.min(astar_attractive_potential, axis=2) + wall_repulsive_potential + wall_raising_potential
 print("deleted")
+
 
 if 5 in active_figures:
     depth = astar_attractive_potential.shape[2]
@@ -336,12 +342,12 @@ if video_flag:
     vid = imageio.get_writer(video_path, fps=fps, codec="libx264")
 
 
-# Evader needs some sort of logic that makes it loop around the pursuers
-# Maybe check what move it wanted to make on the static map, and
-# if the dynamic map move is in the opposite direction, then check for the
-# closest walls to move away from or for the second best move
 
 dx = np.zeros((2, N))
+simulation_exit = False
+avoiding_minima = False
+first_loop = True
+last_iter = 0
 # Iterate for the previously specified number of iterations
 for t in range(iterations):
     x = r.get_poses()
@@ -364,7 +370,7 @@ for t in range(iterations):
             dynamic_pot_field = pursuer_pot_field + static_pot_field
             eva_next_pos = get_next_position(dynamic_pot_field, eva_loc_scaled)
             
-            if t % 190 == 0 and 7 in active_figures:
+            if t % 10 == 0 and 7 in active_figures:
                 # Create two horizontal subplots for potential fields
                 fig, (ax1, ax2) = plt.subplots(1, 2, num=7, figsize=(10, 5))
                 ax1.imshow(pursuer_pot_field, cmap='hot')
@@ -373,7 +379,7 @@ for t in range(iterations):
                 ax2.imshow(dynamic_pot_field, cmap='hot')
                 ax2.set_title('Dynamic Potential Field')
                 plt.show()
-            if t % 190 == 0 and 8 in active_figures:
+            if t % 10 == 0 and 8 in active_figures:
                 # Create two horizontal subplots for potential fields
                 fig, (ax1, ax2) = plt.subplots(1, 2, num=8, figsize=(10, 5), subplot_kw={'projection': '3d'})
                 X, Y = np.meshgrid(np.arange(pursuer_pot_field.shape[1]), np.arange(pursuer_pot_field.shape[0]))
@@ -388,6 +394,61 @@ for t in range(iterations):
                 ax2.set_zlim(ax2.get_zlim()[::-1])  # Invert the z-axis
                 ax2.set_title('Dynamic Potential Field')
                 plt.show()
+
+            if avoid_local_minima:
+                # Check if evader is moving the opposite direction from what the static field suggests
+                # If so, scan a .4x.4 area around the evader and find the lowest energy point on the 
+                # dynamic potential field map and navigate to it with A*
+                eva_desired_next_pos = get_next_position(static_pot_field, eva_loc_scaled)
+                avoiding_minima = False
+                # Wrong direction is if the evader wants to move 180 degrees from the direction it should be
+                # Pursuer nearby is if the evader wants to move any direction other than the direction it should be
+                wrong_direction = (abs(eva_desired_next_pos[0] - eva_next_pos[0]) > 1) or (abs(eva_desired_next_pos[1] - eva_next_pos[1]) > 1)
+                pursuer_nearby = not np.array_equal(eva_desired_next_pos, eva_next_pos)
+                if wrong_direction or (((t - last_iter) < 150) and not first_loop):
+                    if pursuer_nearby:
+                        last_iter = t
+                    first_loop = False
+                    avoiding_minima = True
+                    search_radius = int(0.38 * 500 / scale)  # Convert 0.35m to grid cells
+                    avoiding_local_minima_map = np.copy(inflated_maze)
+                    for i in range(pursuers):
+                        pur_r, pur_c = pur_loc_scaled[0][i], pur_loc_scaled[1][i]
+                        for row in range(max(0, pur_r - search_radius), min(avoiding_local_minima_map.shape[0], pur_r + search_radius + 1)):
+                            for col in range(max(0, pur_c - search_radius), min(avoiding_local_minima_map.shape[1], pur_c + search_radius + 1)):
+                                if np.sqrt((pur_r - row) ** 2 + (pur_c - col) ** 2) <= search_radius:
+                                    avoiding_local_minima_map[row, col] = 0  # Mark as wall
+
+                    # Use A* to find paths to both goals
+                    path_to_goal_1 = astar(avoiding_local_minima_map, eva_loc_scaled, scaled_goals[0])
+                    path_to_goal_2 = astar(avoiding_local_minima_map, eva_loc_scaled, scaled_goals[1])
+
+                    path_to_best = None
+                    # Choose the closer path
+                    if path_to_goal_1 and path_to_goal_2:
+                        path_to_best = path_to_goal_1 if len(path_to_goal_1) < len(path_to_goal_2) else path_to_goal_2
+                    elif path_to_goal_1:
+                        path_to_best = path_to_goal_1
+                    elif path_to_goal_2:
+                        path_to_best = path_to_goal_2
+
+                    if path_to_best and len(path_to_best) > 1:
+                        eva_next_pos = path_to_best[1]
+
+                    
+                    if 9 in active_figures:
+                        plt.figure(num=9)
+                        graph = plt.imshow(avoiding_local_minima_map, cmap='gray')
+                        plt.title('Avoiding Local Minima Maze')
+                        plt.show()
+
+                    #if 9 in active_figures:
+                    #    # Plot the avoiding local minima potential field
+                    #    fig, ax = plt.subplots(num=9, figsize=(10, 5))
+                    #    ax.imshow(avoiding_local_minima_pot_field, cmap='hot')
+                    #    ax.set_title('Avoiding Local Minima Potential Field')
+                    #    plt.show()
+
         else:
             eva_next_pos = get_next_position(static_pot_field, eva_loc_scaled)
 
@@ -446,16 +507,41 @@ for t in range(iterations):
 
 
     # plot an arrow pointing to the next position on figure 1
+    # plot catch circles around the pursuers
     plt.figure(1)
     if 'arrow' in locals():
         arrow.remove()
     #current robot position is not perfectly in center of model
     arrow = plt.arrow(eva_loc[0] + (eva_vel[0,0]/4), eva_loc[1] + (eva_vel[1,0]/4), eva_vel[0,0], eva_vel[1,0], head_width=0.1, head_length=0.1, fc='b', ec='b')
+
+    # If the evader is avoiding local minima, draw stars along the path
+    num_stars = 5
+    # Remove previously plotted stars
+    if 'path_stars' in locals():
+        for star in path_stars:
+            star.remove()
+    path_stars = []
+    if avoiding_minima:    
+        if path_to_best and len(path_to_best) > 1:
+            step = max(1, len(path_to_best) // num_stars)
+            star_positions = path_to_best[step::step]
+            for star_pos in star_positions:
+                eva_star_posx = (star_pos[1] * scale - 800) / 500
+                eva_star_posy = (star_pos[0] * scale - 500) / -500
+                star = plt.scatter(eva_star_posx, eva_star_posy, s=200, c='yellow', marker='*', alpha=0.4, edgecolors='black')
+                path_stars.append(star)
+    
     #Draw arrows for pursuers in red
     for i in range(pursuers):
         if 'arrow' + str(i) in locals():
             locals()['arrow' + str(i)].remove()
         locals()['arrow' + str(i)] = plt.arrow(pur_loc[0, i] + (pur_vel[0, i]/2), pur_loc[1, i] + (pur_vel[1, i]/2), pur_vel[0, i], pur_vel[1, i], head_width=0.1, head_length=0.1, fc='r', ec='r')
+
+        if 'circle' + str(i) in locals():
+            locals()['circle' + str(i)].remove()
+        locals()['circle' + str(i)] = plt.Circle((pur_loc[0, i], pur_loc[1, i]), catch_distance, color='r', alpha=0.1)
+        plt.gca().add_patch(locals()['circle' + str(i)])
+
 
     # Update Iteration and Time marker
     iteration_caption = f'Iteration: {t}'
@@ -477,20 +563,37 @@ for t in range(iterations):
     # Set velocities of agents 1:N
     r.set_velocities(np.arange(N), dx_u_bc)
 
-    # Update the video
-    if video_flag and (t % ipf == 0):
-        # Don't ask why this works, just be glad it does
-        # Capture the current frame from figure 1
-        plt.figure(1)
-        plt.draw()
-        # Save the figure to a memory buffer instead of a file
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=200)
-        buf.seek(0)
-        # Convert buffer image to an array and write to video
-        img = imageio.imread(buf)
-        vid.append_data(img)
+    # Check if the evader is within any of the goal circles
+    for goal in goals:
+        if np.linalg.norm(eva_loc - goal) <= 0.25:
+            plt.figure(1)
+            plt.text(0, 0.02, "Evader Wins!", fontsize=30, color='b', fontweight='bold', ha='center', alpha=0.75)
+            print(f"Evader reached goal at iteration {t}!")
+            simulation_exit = True
+    # Check if the evader is within any of the pursuer circles
+    for i in range(pursuers):
+        if np.linalg.norm(pur_loc[:, i] - eva_loc) < catch_distance:
+            plt.figure(1)
+            plt.text(0, 0.02, "Pursuers Win!", fontsize=30, color='r', fontweight='bold', ha='center', alpha=0.75)
+            print(f"Evader caught by pursuer {i+1} at iteration {t}!")
+            simulation_exit = True
 
+    # Update the video for all active figures
+    if video_flag and ((t % ipf == 0) or simulation_exit):
+        for fig_num in active_figures:
+            plt.figure(fig_num)
+            plt.draw()
+            # Save the figure to a memory buffer instead of a file
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=200)
+            buf.seek(0)
+            # Convert buffer image to an array and write to the corresponding video
+            img = imageio.imread(buf)
+            if f'vid_{fig_num}' not in locals():
+                video_filename = f'MRS_Pur_Eva_{datetime.now().strftime("%Y%m%d_%H%M%S")}_Fig{fig_num}.mp4'
+                video_path = os.path.join(videos_folder, video_filename)
+                locals()[f'vid_{fig_num}'] = imageio.get_writer(video_path, fps=fps, codec="libx264")
+            locals()[f'vid_{fig_num}'].append_data(img)
 
 
     # Save a png of all active figures at specified iterations
@@ -501,10 +604,19 @@ for t in range(iterations):
             plt.figure(fig_num)
             plt.savefig(os.path.join(figures_folder, f'MRS_Pur_Eva_{fig_num}_iter_{t}.png'))
 
+
+    if simulation_exit:
+        break
+
     # Send the previously set velocities to the agents. This function must be called!
     r.step()
 
 
+# Close all video writers at the end of the simulation
+if video_flag:
+    for fig_num in active_figures:
+        if f'vid_{fig_num}' in locals():
+            locals()[f'vid_{fig_num}'].close()
 if video_flag:
     vid.close()
 
